@@ -10,8 +10,15 @@ from typing import Any
 
 from schedule_agent import __version__
 from schedule_agent.agent_run import SKIP_EXIT, log_path, run_job, shlex_join, build_agent_cmd
-from schedule_agent.chats import ChatError, chats_for_cwd, iter_chats, resolve_workspace
-from schedule_agent.config import agent_bin, jobs_path
+from schedule_agent.backends import (
+    BackendError,
+    bin_exists,
+    codex_bin,
+    cursor_bin,
+    normalize_backend,
+)
+from schedule_agent.chats import ChatError, chats_for_cwd, resolve_workspace
+from schedule_agent.config import jobs_path
 from schedule_agent.cron import parse_cron
 from schedule_agent.jobs import (
     JobError,
@@ -41,7 +48,7 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     try:
         return args.func(args)
-    except (JobError, ChatError, TimeError, SetupError) as exc:
+    except (JobError, ChatError, TimeError, SetupError, BackendError) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1
 
@@ -49,12 +56,17 @@ def main(argv: list[str] | None = None) -> int:
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="schedule-agent",
-        description="Schedule prompts into an existing agent chat (Cursor CLI supported).",
+        description="Schedule prompts into an existing agent chat (Cursor CLI and Codex).",
     )
     parser.add_argument("--version", action="version", version=f"schedule-agent {__version__}")
     sub = parser.add_subparsers(dest="cmd", required=True)
 
     add = sub.add_parser("add", help="create a one-shot or recurring job")
+    add.add_argument(
+        "--backend",
+        default="cursor",
+        help="agent backend: cursor or codex (default: cursor)",
+    )
     add.add_argument("--chat-id", required=True, help="chat / thread id to resume")
     add.add_argument("--prompt", help="prompt posted into the resumed chat")
     add.add_argument("--prompt-file", type=Path, help="read prompt from a file")
@@ -103,11 +115,21 @@ def build_parser() -> argparse.ArgumentParser:
     validate = sub.add_parser("validate", help="check agent, timer, and optional chat id")
     validate.add_argument("--chat-id")
     validate.add_argument("--workspace")
+    validate.add_argument(
+        "--backend",
+        default="cursor",
+        help="agent backend to check with --chat-id (default: cursor)",
+    )
     validate.add_argument("--json", action="store_true")
     validate.set_defaults(func=cmd_validate)
 
-    chats = sub.add_parser("chats", help="list local chats (Cursor CLI backend)")
-    chats.add_argument("--cwd", help="limit to chats whose meta cwd matches")
+    chats = sub.add_parser("chats", help="list local chats")
+    chats.add_argument("--cwd", help="limit to chats whose recorded cwd matches")
+    chats.add_argument(
+        "--backend",
+        default="cursor",
+        help="cursor, codex, or all (default: cursor)",
+    )
     chats.add_argument("--json", action="store_true")
     chats.set_defaults(func=cmd_chats)
 
@@ -144,7 +166,8 @@ def cmd_add(args: argparse.Namespace) -> int:
         raise JobError("provide exactly one of --cron or --at")
     parse_timeout(args.timeout)
     prompt = read_prompt(args)
-    workspace = str(resolve_workspace(args.chat_id, args.workspace))
+    backend = normalize_backend(args.backend)
+    workspace = str(resolve_workspace(args.chat_id, args.workspace, backend=backend))
     job_id = validate_job_id(args.name) if args.name else new_job_id()
     created = now_iso()
     if args.cron:
@@ -155,6 +178,7 @@ def cmd_add(args: argparse.Namespace) -> int:
         schedule = {"type": "at", "runAt": when.isoformat(timespec="seconds")}
     job = {
         "id": job_id,
+        "backend": backend,
         "chatId": args.chat_id,
         "workspace": workspace,
         "prompt": prompt,
@@ -179,6 +203,7 @@ def cmd_add(args: argparse.Namespace) -> int:
         print(json.dumps(saved, indent=2))
     else:
         print(f"added {saved['id']}  {format_schedule(saved)}")
+        print(f"backend {saved.get('backend') or 'cursor'}")
         print(f"chat {saved['chatId']}")
         print(f"workspace {saved['workspace']}")
         if schedule["type"] == "cron":
@@ -199,6 +224,7 @@ def cmd_list(args: argparse.Namespace) -> int:
     rows = [
         (
             job["id"],
+            job.get("backend") or "cursor",
             "on" if job.get("enabled", True) else "off",
             format_schedule(job),
             (job.get("lastStatus") or "-"),
@@ -206,13 +232,13 @@ def cmd_list(args: argparse.Namespace) -> int:
         )
         for job in jobs
     ]
-    widths = [max(len(row[i]) for row in rows) for i in range(5)]
-    headers = ["NAME", "ON", "SCHEDULE", "LAST", "LAST_RUN"]
+    widths = [max(len(row[i]) for row in rows) for i in range(6)]
+    headers = ["NAME", "BACKEND", "ON", "SCHEDULE", "LAST", "LAST_RUN"]
     for i, header in enumerate(headers):
         widths[i] = max(widths[i], len(header))
     print("  ".join(header.ljust(widths[i]) for i, header in enumerate(headers)))
     for row in rows:
-        print("  ".join(row[i].ljust(widths[i]) for i in range(5)))
+        print("  ".join(row[i].ljust(widths[i]) for i in range(6)))
     return 0
 
 
@@ -293,13 +319,24 @@ def cmd_validate(args: argparse.Namespace) -> int:
         if not ok:
             report["ok"] = False
 
-    agent = Path(str(agent_bin()))
-    which = shutil.which("agent")
-    if agent.exists() or which:
-        check("agent", True, str(agent if agent.exists() else which))
+    requested = normalize_backend(getattr(args, "backend", "cursor"))
+    cursor = cursor_bin()
+    codex = codex_bin()
+    if bin_exists(cursor):
+        check("cursor", True, str(cursor))
+    elif requested == "cursor":
+        check("cursor", False, "Cursor CLI (agent) not found")
     else:
-        check("agent", False, "agent CLI not found on PATH or ~/.local/bin/agent")
+        report.setdefault("warnings", []).append("Cursor CLI not installed")
+        check("cursor", True, "not installed")
 
+    if bin_exists(codex):
+        check("codex", True, str(codex))
+    elif requested == "codex":
+        check("codex", False, "Codex CLI not found")
+    else:
+        report.setdefault("warnings", []).append("Codex CLI not installed")
+        check("codex", True, "not installed")
     systemctl = shutil.which("systemctl")
     if systemctl:
         check("systemctl", True, systemctl)
@@ -322,8 +359,10 @@ def cmd_validate(args: argparse.Namespace) -> int:
 
     if args.chat_id:
         try:
-            workspace = resolve_workspace(args.chat_id, args.workspace)
-            check("chat", True, f"{args.chat_id} -> {workspace}")
+            workspace = resolve_workspace(
+                args.chat_id, args.workspace, backend=requested
+            )
+            check("chat", True, f"{requested} {args.chat_id} -> {workspace}")
         except ChatError as exc:
             check("chat", False, str(exc))
 
@@ -344,16 +383,23 @@ TIMER_HINT = "run: schedule-agent setup"
 
 
 def cmd_chats(args: argparse.Namespace) -> int:
-    rows = chats_for_cwd(args.cwd) if args.cwd else iter_chats()
+    kind = (args.backend or "cursor").strip().lower()
+    if kind == "all":
+        rows = chats_for_cwd(args.cwd, "cursor") + chats_for_cwd(args.cwd, "codex")
+        rows.sort(key=lambda row: row.get("updatedAt") or "", reverse=True)
+    else:
+        normalize_backend(kind)
+        rows = chats_for_cwd(args.cwd, kind)
     if args.json:
         print(json.dumps(rows, indent=2))
         return 0
     if not rows:
-        print("no chats found under ~/.cursor/chats")
+        print(f"no chats found for backend {kind}")
         return 0
     for row in rows:
         cwd = row.get("cwd") or "-"
-        print(f"{row['id']}  {row['title']}  {cwd}")
+        backend = row.get("backend") or kind
+        print(f"{backend}  {row['id']}  {row['title']}  {cwd}")
     return 0
 
 

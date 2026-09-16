@@ -33,5 +33,8 @@ fi
 if ! command -v agent >/dev/null 2>&1 && [[ ! -x "${HOME}/.local/bin/agent" ]]; then
   echo "WARN: Cursor CLI (agent) not found"
 fi
+if ! command -v codex >/dev/null 2>&1 && [[ ! -x "${HOME}/.local/bin/codex" ]]; then
+  echo "WARN: Codex CLI not found"
+fi
 
 echo "verify finished"

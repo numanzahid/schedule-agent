@@ -2,14 +2,14 @@ from __future__ import annotations
 
 import fcntl
 import os
-import shutil
 import subprocess
 import time
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Iterator
 
-from schedule_agent.config import agent_bin, default_path, ensure_dirs, log_dir
+from schedule_agent.backends import BackendError, build_cmd
+from schedule_agent.config import default_path, ensure_dirs, log_dir
 from schedule_agent.jobs import lock_path_for, now_iso
 from schedule_agent.timeparse import parse_timeout
 
@@ -45,26 +45,10 @@ def log_path(job_id: str) -> Path:
 
 
 def build_agent_cmd(job: dict, extra_env: dict[str, str] | None = None) -> list[str]:
-    binary = str(agent_bin())
-    if binary != "agent" and not Path(binary).exists() and shutil.which("agent") is None:
-        raise RunError(f"agent CLI not found (looked for {binary})", exit_code=2)
-    resolved = binary if Path(binary).exists() else (shutil.which("agent") or binary)
-    cmd = [
-        resolved,
-        f"--workspace={job['workspace']}",
-        f"--resume={job['chatId']}",
-        "-p",
-        job["prompt"],
-        "--print",
-        "--output-format",
-        "text",
-        "--force",
-        "--trust",
-    ]
-    model = job.get("model")
-    if model:
-        cmd.extend(["--model", model])
-    return cmd
+    try:
+        return build_cmd(job)
+    except BackendError as exc:
+        raise RunError(str(exc), exit_code=2) from exc
 
 
 def run_job(job: dict, dry_run: bool = False) -> int:
@@ -93,8 +77,9 @@ def _exec(job: dict, cmd: list[str]) -> int:
     path = log_path(job_id)
     ensure_dirs()
     started = time.time()
+    backend = job.get("backend") or "cursor"
     header = (
-        f"===== {now_iso()} START job={job_id} "
+        f"===== {now_iso()} START job={job_id} backend={backend} "
         f"chat={job['chatId']} workspace={job['workspace']} =====\n"
         f"cmd: {shlex_join(cmd)}\n"
     )
@@ -110,6 +95,7 @@ def _exec(job: dict, cmd: list[str]) -> int:
                 cmd,
                 cwd=job["workspace"],
                 env=env,
+                stdin=subprocess.DEVNULL,
                 stdout=log,
                 stderr=subprocess.STDOUT,
                 timeout=timeout_s,

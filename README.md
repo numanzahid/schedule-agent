@@ -7,24 +7,24 @@ A `sleep` loop inside an IDE terminal dies when that session ends. This tool sto
 ```text
 systemd user timer (2 files, forever)
   -> schedule-agent tick
-  -> <agent-cli> --resume=<chat-id> -p "..."
+  -> Cursor CLI or Codex resume
   -> new messages in the same chat thread
 ```
 
 ## Supported agents
 
-| Agent | Status | CLI |
-|-------|--------|-----|
-| Cursor CLI | supported | `agent` (`~/.local/bin/agent`) |
-| Codex | planned | |
+| Agent | Status | CLI | Resume command |
+|-------|--------|-----|----------------|
+| Cursor CLI | supported | `agent` | `agent --resume <id> -p "..." --print --force --trust` |
+| Codex | supported | `codex` | `codex exec resume <id> "..."` |
 
-The job model (chat id, prompt, `--at` / `--cron`, timeout, logs) is shared. Only the resume command differs per backend.
+Pick the backend per job with `--backend cursor` (default) or `--backend codex`.
 
 ## Requirements
 
 - Linux with systemd user sessions
 - Python 3.9+ (no extra pip packages)
-- A supported agent CLI, logged in for non-interactive use
+- At least one supported agent CLI, logged in for non-interactive use
 - Optional once: `sudo loginctl enable-linger $USER` so jobs run while logged out
 
 ## Install
@@ -44,22 +44,29 @@ This copies the CLI to `~/.local/bin/schedule-agent`, installs the skill, and en
 
 ```bash
 schedule-agent validate
-schedule-agent chats --cwd "$PWD"
+schedule-agent chats --backend cursor --cwd "$PWD"
+schedule-agent chats --backend codex --cwd "$PWD"
 
+# Cursor CLI
 schedule-agent add \
-  --chat-id <chat-id> \
+  --backend cursor \
+  --chat-id <cursor-thread-id> \
   --name daily-report \
   --cron "0 6 * * *" \
   --prompt "Run the report script and post markdown. Do not ask questions; complete autonomously."
 
+# Codex
 schedule-agent add \
-  --chat-id <chat-id> \
+  --backend codex \
+  --chat-id <codex-session-id> \
+  --workspace "$PWD" \
   --name reminder \
   --at "now + 2 hours" \
   --prompt "Check the pending task. Do not ask questions; complete autonomously."
 
 schedule-agent list
 schedule-agent run daily-report
+schedule-agent log reminder
 schedule-agent remove daily-report
 ```
 
@@ -72,12 +79,12 @@ schedule-agent remove daily-report
 | `enable` / `disable` | Toggle without deleting |
 | `run` | Run now (ignore the clock) |
 | `tick` | Run due jobs (systemd calls this) |
-| `chats` | List local chat ids (Cursor CLI backend) |
-| `validate` | Preflight agent CLI + timer |
+| `chats` | List local chats (`--backend cursor\|codex\|all`) |
+| `validate` | Preflight CLIs + timer (`--backend` selects which CLI is required) |
 | `log` | Tail a job log |
 | `setup` | Write/enable the two user units |
 
-`add` flags: `--chat-id`, `--prompt` or `--prompt-file`, `--cron` or `--at`, optional `--name`, `--workspace`, `--timeout` (default `30m`), `--model`, `--replace`, `--json`, `--dry-run`.
+`add` flags: `--backend`, `--chat-id`, `--prompt` or `--prompt-file`, `--cron` or `--at`, optional `--name`, `--workspace`, `--timeout` (default `30m`), `--model`, `--replace`, `--json`, `--dry-run`.
 
 `--at` examples: `now + 2 hours`, `2026-09-17T06:00:00`. `--cron` is 5 fields (`0 6 * * *`).
 
@@ -96,7 +103,7 @@ One-shot jobs disable themselves after the first attempt so a failure does not r
 
 Per-job flock prevents overlap. Logs: `~/.local/state/schedule-agent/logs/<name>.log`.
 
-A run is done when the agent CLI process exits (`--print` / non-interactive mode). Default timeout is 30 minutes (`--timeout` to change). Exit `124` means the timeout killed the process.
+A run is done when the agent CLI process exits. Default timeout is 30 minutes (`--timeout` to change). Exit `124` means the timeout killed the process.
 
 ## Cursor CLI notes
 
@@ -113,6 +120,24 @@ Unattended Cursor CLI runs use `--print --force --trust`. Project `.cursor/cli.j
 
 See `examples/cli.json`. After install, Cursor can load `~/.cursor/skills/schedule-agent/SKILL.md`.
 
+## Codex notes
+
+Unattended Codex runs use:
+
+```bash
+codex exec resume <session-id> "<prompt>" \
+  -C <workspace> \
+  --skip-git-repo-check \
+  --color never \
+  --dangerously-bypass-approvals-and-sandbox
+```
+
+That skips approval prompts so a scheduled job cannot hang waiting for a TUI. Keep `--timeout` set. Confirm login with `codex login status` before relying on a schedule.
+
+`schedule-agent chats --backend codex` reads session files under `~/.codex/sessions`. `--workspace` is required if a session has no recorded cwd.
+
+Do not use interactive `codex resume` for scheduled jobs.
+
 ## Uninstall
 
 ```bash
@@ -128,8 +153,9 @@ See `examples/cli.json`. After install, Cursor can load `~/.cursor/skills/schedu
 | No chat message | `schedule-agent log <name>` |
 | Permission prompts (Cursor CLI) | expand `.cursor/cli.json` allow rules |
 | Invalid project config (Cursor CLI) | `.cursor/cli.json` must be permissions-only JSON |
+| Codex auth errors | `codex login status` then `codex login` |
 | Logged-out jobs missing | `loginctl show-user $USER -p Linger` then `sudo loginctl enable-linger $USER` |
-| Chat id unknown | `schedule-agent chats --cwd "$PWD"` |
+| Chat id unknown | `schedule-agent chats --backend cursor\|codex --cwd "$PWD"` |
 
 ## License
 

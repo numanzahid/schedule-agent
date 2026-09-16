@@ -58,10 +58,35 @@ class CliAddTests(unittest.TestCase):
         jobs = list_jobs()
         self.assertEqual(len(jobs), 1)
         self.assertEqual(jobs[0]["id"], "daily")
+        self.assertEqual(jobs[0]["backend"], "cursor")
         self.assertEqual(jobs[0]["schedule"]["expr"], "0 6 * * *")
         self.assertEqual(main(["list", "--json"]), 0)
         self.assertEqual(main(["remove", "daily"]), 0)
         self.assertEqual(load_registry()["jobs"], {})
+
+    def test_add_codex_dry_run(self) -> None:
+        os.environ["SCHEDULE_CODEX_BIN"] = "/tmp/fake-codex"
+        code = main(
+            [
+                "add",
+                "--backend",
+                "codex",
+                "--chat-id",
+                "sess-1",
+                "--workspace",
+                str(self.workspace),
+                "--name",
+                "cx",
+                "--at",
+                "now + 1 hour",
+                "--prompt",
+                "Ping.",
+                "--dry-run",
+            ]
+        )
+        self.assertEqual(code, 0)
+        self.assertEqual(load_registry()["jobs"], {})
+        os.environ.pop("SCHEDULE_CODEX_BIN", None)
 
     def test_add_rejects_both_schedules(self) -> None:
         code = main(

@@ -4,21 +4,21 @@ description: >-
   Schedules prompts into an existing agent chat after the interactive session
   is closed. Use when the user wants a reminder, cron, one-shot, or recurring
   agent run in a chat thread; when they mention schedule-agent, Cursor CLI,
-  at/cron jobs, or systemd user timers for agents.
+  Codex, at/cron jobs, or systemd user timers for agents.
 ---
 
 # schedule-agent
 
 Use the `schedule-agent` CLI. Do not write per-job files under `~/.config/systemd/user/`. Do not use a `sleep` loop in an IDE terminal (it dies when the chat closes).
 
-Supported now: **Cursor CLI** (`agent`). Codex is planned.
+Supported backends: **Cursor CLI** (`agent`, default) and **Codex** (`codex exec resume`).
 
 ## Workflow
 
-1. `schedule-agent validate` (and `validate --chat-id <id>` when the id is known).
-2. Resolve chat id: user-supplied, or `schedule-agent chats --cwd "$PWD" --json`.
+1. `schedule-agent validate --backend cursor` or `--backend codex`.
+2. Resolve chat id: user-supplied, or `schedule-agent chats --backend <cursor|codex> --cwd "$PWD" --json`.
 3. Compose a prompt that names exact steps and ends with: `Do not ask questions; complete autonomously.`
-4. Add the job (`--at` or `--cron`, never both).
+4. Add the job with `--backend cursor` or `--backend codex` (`--at` or `--cron`, never both).
 5. Confirm with `schedule-agent show <name>` and tell the user how to cancel: `schedule-agent remove <name>`.
 
 If validate says the timer is off: `schedule-agent setup`.
@@ -26,19 +26,18 @@ If validate says the timer is off: `schedule-agent setup`.
 ## Commands
 
 ```bash
-schedule-agent add --chat-id <uuid> --prompt "..." --at "now + 2 hours" --name reminder
-schedule-agent add --chat-id <uuid> --prompt "..." --cron "0 6 * * *" --name daily-report
-schedule-agent add --chat-id <uuid> --prompt-file /tmp/prompt.txt --cron "0 9 * * 1" --name monday
+schedule-agent add --backend cursor --chat-id <uuid> --prompt "..." --at "now + 2 hours" --name reminder
+schedule-agent add --backend codex --chat-id <uuid> --workspace "$PWD" --prompt "..." --cron "0 6 * * *" --name daily
 schedule-agent list --json
 schedule-agent show <name>
 schedule-agent remove <name>
 schedule-agent run <name>
 schedule-agent log <name>
-schedule-agent chats --cwd "$PWD" --json
-schedule-agent validate --chat-id <uuid>
+schedule-agent chats --backend all --cwd "$PWD" --json
+schedule-agent validate --backend codex --chat-id <uuid>
 ```
 
-`--workspace` is optional for Cursor CLI when `~/.cursor/chats/*/<id>/meta.json` has `cwd`.
+For Cursor CLI, `--workspace` is optional when `~/.cursor/chats/*/<id>/meta.json` has `cwd`. For Codex, pass `--workspace` if `chats` does not show a cwd.
 
 ## Schedule mapping
 
@@ -73,9 +72,14 @@ Unattended Cursor CLI runs use `--force` and `--trust`. Project `.cursor/cli.jso
 
 Keep `approvalMode` in `~/.cursor/cli-config.json` if needed.
 
+## Codex notes
+
+Unattended Codex uses `codex exec resume` with `--dangerously-bypass-approvals-and-sandbox`. Confirm `codex login status` first. Do not use interactive `codex resume` for schedules.
+
 ## Do not
 
 - `crontab -e`, `sudo crontab`, or files in `/etc/cron.d`
 - New systemd units per job
 - Call the agent CLI by hand unless debugging (`schedule-agent run` is the path)
 - Ask the user questions after they asked to schedule; pick `--name` from the task slug
+- Mix Cursor and Codex ids on the same job
