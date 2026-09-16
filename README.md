@@ -155,7 +155,7 @@ Each due job:
 
 1. Takes a per-job flock (overlap prints `SKIP` and does not mark success)
 2. Runs Cursor CLI or Codex with stdin closed
-3. Appends `~/ .local/state/schedule-agent/logs/<name>.log` with start time, chat id, command, output, end time, exit code
+3. Appends `~/.local/state/schedule-agent/logs/<name>.log` with start time, chat id, command, output, end time, exit code
 4. Stores `lastRun` / `lastStatus` / `lastExit`
 5. If the job was `--new`, writes the created `chatId` so the next tick resumes (unless `--new-each-run`)
 6. One-shot `--at` jobs disable after the first attempt
