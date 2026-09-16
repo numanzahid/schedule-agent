@@ -43,7 +43,7 @@ class CliAddTests(unittest.TestCase):
             [
                 "add",
                 "--chat-id",
-                "880826cf-1a45-4e64-a06f-fed5f23f9d0f",
+                "11111111-1111-4111-8111-111111111111",
                 "--workspace",
                 str(self.workspace),
                 "--name",
@@ -105,6 +105,64 @@ class CliAddTests(unittest.TestCase):
             ]
         )
         self.assertEqual(code, 1)
+
+    def test_add_new_requires_workspace(self) -> None:
+        code = main(
+            [
+                "add",
+                "--new",
+                "--at",
+                "now + 1 hour",
+                "--prompt",
+                "x",
+            ]
+        )
+        self.assertEqual(code, 1)
+
+    def test_add_new_dry_run(self) -> None:
+        code = main(
+            [
+                "add",
+                "--new",
+                "--workspace",
+                str(self.workspace),
+                "--name",
+                "spawned",
+                "--at",
+                "now + 1 hour",
+                "--prompt",
+                "Ping.",
+                "--args",
+                "--sandbox disabled",
+                "--dry-run",
+            ]
+        )
+        self.assertEqual(code, 0)
+        self.assertEqual(load_registry()["jobs"], {})
+
+    def test_add_new_saves_spawn_once(self) -> None:
+        code = main(
+            [
+                "add",
+                "--new",
+                "--workspace",
+                str(self.workspace),
+                "--name",
+                "spawned",
+                "--at",
+                "now + 1 hour",
+                "--prompt",
+                "Ping.",
+                "--args",
+                "--sandbox disabled",
+            ]
+        )
+        self.assertEqual(code, 0)
+        job = list_jobs()[0]
+        self.assertIsNone(job["chatId"])
+        self.assertEqual(job["spawn"], "once")
+        self.assertEqual(job["extraArgs"], ["--sandbox", "disabled"])
+        self.assertEqual(main(["remove", "spawned"]), 0)
 
 
 if __name__ == "__main__":

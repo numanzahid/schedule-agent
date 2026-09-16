@@ -36,9 +36,26 @@ cd schedule-agent
 ./scripts/verify.sh
 ```
 
-This copies the CLI to `~/.local/bin/schedule-agent`, installs the skill, and enables the dispatcher timer.
+This copies the CLI to `~/.local/bin/schedule-agent`, installs the skill for both Cursor and Codex, and enables the dispatcher timer.
 
 `~/.local/bin` must be on your PATH.
+
+## How agents learn this tool
+
+They do not get the CLI flags from training data. After install, the same `skill/SKILL.md` is copied to:
+
+- Cursor: `~/.cursor/skills/schedule-agent/SKILL.md`
+- Codex: `~/.codex/skills/schedule-agent/SKILL.md`
+
+The YAML `description` is what makes the skill show up when the user asks to schedule, remind, cron, or resume a chat later. The skill body tells the agent to run `schedule-agent`, pick `--backend cursor` or `--backend codex`, and resolve `--chat-id` with `schedule-agent chats`.
+
+A new Cursor or Codex turn is needed after the first install so the skill is picked up.
+
+You can also point an agent at the repo README, or add a line to a project `AGENTS.md`:
+
+```text
+Scheduled follow-ups: use `schedule-agent` (skill: schedule-agent).
+```
 
 ## Quick start
 
@@ -84,7 +101,23 @@ schedule-agent remove daily-report
 | `log` | Tail a job log |
 | `setup` | Write/enable the two user units |
 
-`add` flags: `--backend`, `--chat-id`, `--prompt` or `--prompt-file`, `--cron` or `--at`, optional `--name`, `--workspace`, `--timeout` (default `30m`), `--model`, `--replace`, `--json`, `--dry-run`.
+`add` flags: `--backend`, `--chat-id` or `--new`, `--workspace`, `--prompt` or `--prompt-file`, `--cron` or `--at`, optional `--name`, `--timeout` (default `30m`), `--model`, `--arg` / `--args`, `--new-each-run`, `--replace`, `--json`, `--dry-run`.
+
+`--new` starts a new chat in `--workspace` (required). The first run creates the session and stores its id; later runs resume it unless you also pass `--new-each-run`.
+
+`--arg` is repeatable extra CLI tokens for that backend. `--args` is the same thing as one shell-quoted string. If a flag starts with `-`, prefer `--args '--sandbox disabled'` or `--arg=--sandbox` so the shell/parser does not eat it.
+
+```bash
+schedule-agent add --backend cursor --new --workspace "$PWD" \
+  --name nightly --cron "0 2 * * *" \
+  --prompt "Run tests and summarize. Do not ask questions; complete autonomously." \
+  --args "--sandbox disabled"
+
+schedule-agent add --backend codex --new --workspace "$PWD" \
+  --name fresh-codex --at "now + 5 minutes" \
+  --prompt "Reply with exactly: HI. Do not ask questions; complete autonomously." \
+  --arg -s --arg workspace-write
+```
 
 `--at` examples: `now + 2 hours`, `2026-09-17T06:00:00`. `--cron` is 5 fields (`0 6 * * *`).
 
@@ -118,7 +151,7 @@ Unattended Cursor CLI runs use `--print --force --trust`. Project `.cursor/cli.j
 }
 ```
 
-See `examples/cli.json`. After install, Cursor can load `~/.cursor/skills/schedule-agent/SKILL.md`.
+See `examples/cli.json`. After install, Cursor loads `~/.cursor/skills/schedule-agent/SKILL.md`.
 
 ## Codex notes
 
@@ -136,7 +169,7 @@ That skips approval prompts so a scheduled job cannot hang waiting for a TUI. Ke
 
 `schedule-agent chats --backend codex` reads session files under `~/.codex/sessions`. `--workspace` is required if a session has no recorded cwd.
 
-Do not use interactive `codex resume` for scheduled jobs.
+Do not use interactive `codex resume` for scheduled jobs. After install, Codex loads `~/.codex/skills/schedule-agent/SKILL.md`.
 
 ## Uninstall
 

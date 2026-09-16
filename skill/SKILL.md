@@ -23,11 +23,28 @@ Supported backends: **Cursor CLI** (`agent`, default) and **Codex** (`codex exec
 
 If validate says the timer is off: `schedule-agent setup`.
 
+## Which backend and chat id
+
+Match the agent that should wake up, not necessarily the agent writing the job.
+
+| Goal | `--backend` | `--chat-id` |
+|------|-------------|-------------|
+| Continue **this** Cursor chat later | `cursor` | `schedule-agent chats --backend cursor --cwd "$PWD" --json` |
+| Continue **this** Codex chat later | `codex` | `schedule-agent chats --backend codex --cwd "$PWD" --json` |
+| Start a **new** chat | matching backend | `--new --workspace /abs/path` (no `--chat-id`) |
+| Wake a **different** existing chat | that chat's backend | that chat's id |
+
+`--new` creates a chat on the first run in `--workspace`, then later ticks resume it. `--new-each-run` starts a fresh chat every time. Pass extra CLI flags with `--arg` (repeatable) or `--args '...'`.
+
 ## Commands
 
 ```bash
 schedule-agent add --backend cursor --chat-id <uuid> --prompt "..." --at "now + 2 hours" --name reminder
+schedule-agent add --backend cursor --new --workspace /path/to/project --prompt "..." --at "now + 10 minutes" --name fresh
+schedule-agent add --backend cursor --new --new-each-run --workspace /path/to/project --cron "0 6 * * *" --name daily-fresh
+schedule-agent add --backend cursor --new --workspace "$PWD" --at "now" --prompt "..." --args "--sandbox disabled"
 schedule-agent add --backend codex --chat-id <uuid> --workspace "$PWD" --prompt "..." --cron "0 6 * * *" --name daily
+schedule-agent add --backend codex --new --workspace "$PWD" --prompt "..." --at "now + 1 hour" --arg -s --arg workspace-write
 schedule-agent list --json
 schedule-agent show <name>
 schedule-agent remove <name>

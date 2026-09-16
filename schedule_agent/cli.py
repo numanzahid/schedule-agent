@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import shlex
 import shutil
 import sys
 from datetime import datetime
@@ -56,7 +57,7 @@ def main(argv: list[str] | None = None) -> int:
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="schedule-agent",
-        description="Schedule prompts into an existing agent chat (Cursor CLI and Codex).",
+        description="Schedule prompts into an existing or new agent chat (Cursor CLI and Codex).",
     )
     parser.add_argument("--version", action="version", version=f"schedule-agent {__version__}")
     sub = parser.add_subparsers(dest="cmd", required=True)
@@ -67,15 +68,36 @@ def build_parser() -> argparse.ArgumentParser:
         default="cursor",
         help="agent backend: cursor or codex (default: cursor)",
     )
-    add.add_argument("--chat-id", required=True, help="chat / thread id to resume")
-    add.add_argument("--prompt", help="prompt posted into the resumed chat")
+    add.add_argument("--chat-id", help="existing chat / thread id to resume")
+    add.add_argument(
+        "--new",
+        action="store_true",
+        help="start a new chat in --workspace (first run creates it; later runs resume unless --new-each-run)",
+    )
+    add.add_argument(
+        "--new-each-run",
+        action="store_true",
+        help="start a fresh chat on every run instead of resuming the first one",
+    )
+    add.add_argument("--prompt", help="prompt posted into the chat")
     add.add_argument("--prompt-file", type=Path, help="read prompt from a file")
-    add.add_argument("--workspace", help="workspace path (default: chat meta.json cwd)")
+    add.add_argument("--workspace", help="workspace folder (required with --new)")
     add.add_argument("--name", help="stable job id (default: generated)")
     add.add_argument("--cron", help='5-field cron, e.g. "0 6 * * *"')
     add.add_argument("--at", dest="at_when", help='one-shot time, e.g. "now + 2 hours"')
     add.add_argument("--timeout", default="30m", help="agent timeout (default: 30m)")
-    add.add_argument("--model", help="optional --model passed to agent")
+    add.add_argument("--model", help="optional --model / -m passed to the backend")
+    add.add_argument(
+        "--arg",
+        action="append",
+        default=[],
+        help="extra backend CLI flag or value (repeatable)",
+    )
+    add.add_argument(
+        "--args",
+        dest="args_string",
+        help="extra backend CLI flags as one shell-quoted string",
+    )
     add.add_argument("--replace", action="store_true", help="overwrite an existing job id")
     add.add_argument("--json", action="store_true", help="print the job as JSON")
     add.add_argument("--dry-run", action="store_true", help="print the agent command and do not save")
@@ -161,13 +183,40 @@ def read_prompt(args: argparse.Namespace) -> str:
     return text
 
 
+def collect_extra_args(args: argparse.Namespace) -> list[str]:
+    extra = list(args.arg or [])
+    raw = getattr(args, "args_string", None)
+    if raw:
+        extra.extend(shlex.split(raw))
+    return extra
+
+
 def cmd_add(args: argparse.Namespace) -> int:
     if bool(args.cron) == bool(args.at_when):
         raise JobError("provide exactly one of --cron or --at")
     parse_timeout(args.timeout)
     prompt = read_prompt(args)
     backend = normalize_backend(args.backend)
-    workspace = str(resolve_workspace(args.chat_id, args.workspace, backend=backend))
+    spawn_each = bool(args.new_each_run)
+    spawn_new = bool(args.new) or spawn_each
+    if spawn_new and args.chat_id:
+        raise JobError("use either --chat-id or --new, not both")
+    if not spawn_new and not args.chat_id:
+        raise JobError("provide --chat-id to resume, or --new to start a chat")
+    if spawn_new:
+        if not args.workspace:
+            raise JobError("--workspace is required with --new")
+        workspace_path = Path(args.workspace).expanduser().resolve()
+        if not workspace_path.is_dir():
+            raise ChatError(f"workspace is not a directory: {workspace_path}")
+        workspace = str(workspace_path)
+        chat_id = None
+        spawn = "each" if spawn_each else "once"
+    else:
+        workspace = str(resolve_workspace(args.chat_id, args.workspace, backend=backend))
+        chat_id = args.chat_id
+        spawn = None
+    extra = collect_extra_args(args)
     job_id = validate_job_id(args.name) if args.name else new_job_id()
     created = now_iso()
     if args.cron:
@@ -179,17 +228,20 @@ def cmd_add(args: argparse.Namespace) -> int:
     job = {
         "id": job_id,
         "backend": backend,
-        "chatId": args.chat_id,
+        "chatId": chat_id,
         "workspace": workspace,
         "prompt": prompt,
         "schedule": schedule,
         "timeout": args.timeout,
         "model": args.model,
+        "extraArgs": extra,
+        "spawn": spawn,
         "enabled": True,
         "createdAt": created,
         "lastRun": None,
         "lastStatus": None,
         "lastExit": None,
+        "lastChatId": None,
     }
     if args.dry_run:
         print(shlex_join(build_agent_cmd(job)))
@@ -204,8 +256,14 @@ def cmd_add(args: argparse.Namespace) -> int:
     else:
         print(f"added {saved['id']}  {format_schedule(saved)}")
         print(f"backend {saved.get('backend') or 'cursor'}")
-        print(f"chat {saved['chatId']}")
+        print(f"chat {saved['chatId'] or '(new)'}")
         print(f"workspace {saved['workspace']}")
+        if saved.get("spawn") == "each":
+            print("starts a new chat on every run")
+        elif saved.get("spawn") == "once":
+            print("starts a new chat on first run, then resumes it")
+        if saved.get("extraArgs"):
+            print("extra", " ".join(saved["extraArgs"]))
         if schedule["type"] == "cron":
             print("runs when the dispatcher timer fires on a matching minute")
         else:
@@ -267,11 +325,11 @@ def cmd_toggle(args: argparse.Namespace, enabled: bool) -> int:
 def cmd_run(args: argparse.Namespace) -> int:
     job = _require_job(args.name)
     if args.dry_run:
-        return run_job(job, dry_run=True)
-    exit_code = run_job(job, dry_run=False)
+        return run_job(job, dry_run=True)[0]
+    exit_code, spawned = run_job(job, dry_run=False)
     if exit_code == SKIP_EXIT:
         return 0
-    _record_run(job["id"], exit_code)
+    _record_run(job, exit_code, spawned)
     return 0 if exit_code == 0 else 3
 
 
@@ -283,27 +341,35 @@ def cmd_tick(args: argparse.Namespace) -> int:
             print(job["id"])
         return 0
     for job in due:
-        exit_code = run_job(job, dry_run=False)
+        exit_code, spawned = run_job(job, dry_run=False)
         if exit_code == SKIP_EXIT:
             continue
-        _record_run(job["id"], exit_code, complete_one_shot=True)
+        _record_run(job, exit_code, spawned, complete_one_shot=True)
     return 0
 
 
-def _record_run(job_id: str, exit_code: int, complete_one_shot: bool = False) -> None:
+def _record_run(
+    job: dict[str, Any],
+    exit_code: int,
+    spawned: str | None,
+    complete_one_shot: bool = False,
+) -> None:
     status = "ok" if exit_code == 0 else "failed"
     fields: dict[str, Any] = {
         "lastRun": now_iso(),
         "lastStatus": status,
         "lastExit": exit_code,
     }
+    if spawned:
+        fields["lastChatId"] = spawned
+        if job.get("spawn") != "each":
+            fields["chatId"] = spawned
     if complete_one_shot:
-        job = _require_job(job_id)
         if job.get("schedule", {}).get("type") == "at":
             fields["enabled"] = False
             if status == "ok":
                 fields["completedAt"] = fields["lastRun"]
-    update_job(job_id, **fields)
+    update_job(job["id"], **fields)
 
 
 def cmd_validate(args: argparse.Namespace) -> int:

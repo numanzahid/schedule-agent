@@ -8,7 +8,7 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Iterator
 
-from schedule_agent.backends import BackendError, build_cmd
+from schedule_agent.backends import BackendError, build_cmd, parse_spawned_id, should_spawn
 from schedule_agent.config import default_path, ensure_dirs, log_dir
 from schedule_agent.jobs import lock_path_for, now_iso
 from schedule_agent.timeparse import parse_timeout
@@ -51,17 +51,17 @@ def build_agent_cmd(job: dict, extra_env: dict[str, str] | None = None) -> list[
         raise RunError(str(exc), exit_code=2) from exc
 
 
-def run_job(job: dict, dry_run: bool = False) -> int:
+def run_job(job: dict, dry_run: bool = False) -> tuple[int, str | None]:
     job_id = job["id"]
     cmd = build_agent_cmd(job)
     if dry_run:
-        print(" ".join(shlex_join(cmd)))
-        return 0
+        print(shlex_join(cmd))
+        return 0, None
 
     with job_lock(job_id) as acquired:
         if not acquired:
             print(f"SKIP: {job_id} already running")
-            return SKIP_EXIT
+            return SKIP_EXIT, None
         return _exec(job, cmd)
 
 
@@ -71,22 +71,24 @@ def shlex_join(cmd: list[str]) -> str:
     return " ".join(shlex.quote(part) for part in cmd)
 
 
-def _exec(job: dict, cmd: list[str]) -> int:
+def _exec(job: dict, cmd: list[str]) -> tuple[int, str | None]:
     job_id = job["id"]
     timeout_s = parse_timeout(str(job.get("timeout") or "30m"))
     path = log_path(job_id)
     ensure_dirs()
     started = time.time()
     backend = job.get("backend") or "cursor"
+    chat = job.get("chatId") or "(new)"
     header = (
         f"===== {now_iso()} START job={job_id} backend={backend} "
-        f"chat={job['chatId']} workspace={job['workspace']} =====\n"
+        f"chat={chat} spawn={should_spawn(job)} workspace={job['workspace']} =====\n"
         f"cmd: {shlex_join(cmd)}\n"
     )
     env = os.environ.copy()
     env["PATH"] = default_path()
     env["HOME"] = str(Path.home())
     env["LANG"] = env.get("LANG") or "C.UTF-8"
+    output = ""
     with path.open("a", encoding="utf-8") as log:
         log.write(header)
         log.flush()
@@ -96,18 +98,29 @@ def _exec(job: dict, cmd: list[str]) -> int:
                 cwd=job["workspace"],
                 env=env,
                 stdin=subprocess.DEVNULL,
-                stdout=log,
+                stdout=subprocess.PIPE,
                 stderr=subprocess.STDOUT,
                 timeout=timeout_s,
                 check=False,
+                text=True,
             )
             exit_code = proc.returncode
-        except subprocess.TimeoutExpired:
+            output = proc.stdout or ""
+            log.write(output)
+            if output and not output.endswith("\n"):
+                log.write("\n")
+        except subprocess.TimeoutExpired as exc:
             exit_code = 124
+            output = (exc.stdout or "") if isinstance(exc.stdout, str) else ""
+            if output:
+                log.write(output)
             log.write(f"ERROR: timed out after {timeout_s}s\n")
         except FileNotFoundError as exc:
             exit_code = 2
             log.write(f"ERROR: {exc}\n")
+        spawned = parse_spawned_id(output) if should_spawn(job) else None
+        if spawned:
+            log.write(f"spawned_chat_id={spawned}\n")
         duration = int(time.time() - started)
         log.write(f"===== {now_iso()} END exit={exit_code} duration={duration}s =====\n")
-    return exit_code
+    return exit_code, spawned

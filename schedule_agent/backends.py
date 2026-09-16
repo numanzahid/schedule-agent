@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import os
 import shutil
 from pathlib import Path
@@ -50,6 +51,17 @@ def bin_exists(path: Path) -> bool:
     return shutil.which(str(path)) is not None or shutil.which(path.name) is not None
 
 
+def extra_args(job: dict) -> list[str]:
+    raw = job.get("extraArgs") or []
+    return [str(part) for part in raw]
+
+
+def should_spawn(job: dict) -> bool:
+    if (job.get("spawn") or "") == "each":
+        return True
+    return not bool(job.get("chatId"))
+
+
 def build_cmd(job: dict) -> list[str]:
     backend = normalize_backend(job.get("backend"))
     if backend == "codex":
@@ -59,26 +71,30 @@ def build_cmd(job: dict) -> list[str]:
 
 def _cursor_cmd(job: dict) -> list[str]:
     resolved = str(cursor_bin())
+    spawn = should_spawn(job)
     cmd = [
         resolved,
         f"--workspace={job['workspace']}",
-        f"--resume={job['chatId']}",
         "-p",
         job["prompt"],
         "--print",
         "--output-format",
-        "text",
+        "json" if spawn else "text",
         "--force",
         "--trust",
     ]
+    if not spawn:
+        cmd.insert(2, f"--resume={job['chatId']}")
     model = job.get("model")
     if model:
         cmd.extend(["--model", model])
+    cmd.extend(extra_args(job))
     return cmd
 
 
 def _codex_cmd(job: dict) -> list[str]:
     resolved = str(codex_bin())
+    spawn = should_spawn(job)
     cmd = [
         resolved,
         "exec",
@@ -89,10 +105,39 @@ def _codex_cmd(job: dict) -> list[str]:
         "never",
         "--dangerously-bypass-approvals-and-sandbox",
     ]
+    if spawn:
+        cmd.append("--json")
     model = job.get("model")
     if model:
         cmd.extend(["-m", model])
     last_file = log_dir() / f"{job['id']}.last.txt"
     cmd.extend(["-o", str(last_file)])
-    cmd.extend(["resume", job["chatId"], job["prompt"]])
+    cmd.extend(extra_args(job))
+    if spawn:
+        cmd.append(job["prompt"])
+    else:
+        cmd.extend(["resume", job["chatId"], job["prompt"]])
     return cmd
+
+
+def parse_spawned_id(output: str) -> str | None:
+    for line in output.splitlines():
+        text = line.strip()
+        if not text.startswith("{"):
+            continue
+        try:
+            data = json.loads(text)
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(data, dict):
+            continue
+        for key in ("session_id", "thread_id"):
+            value = data.get(key)
+            if value:
+                return str(value)
+        if data.get("type") == "thread.started" and data.get("thread_id"):
+            return str(data["thread_id"])
+        payload = data.get("payload")
+        if isinstance(payload, dict) and data.get("type") == "session_meta" and payload.get("id"):
+            return str(payload["id"])
+    return None
