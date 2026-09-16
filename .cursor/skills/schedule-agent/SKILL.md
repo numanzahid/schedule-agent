@@ -1,17 +1,17 @@
 ---
 name: schedule-agent
 description: >-
-  Schedules prompts into an existing agent chat after the interactive session
-  is closed. Use when the user wants a reminder, cron, one-shot, or recurring
-  agent run in a chat thread; when they mention schedule-agent, Cursor CLI,
-  Codex, at/cron jobs, or systemd user timers for agents.
+  Schedules prompts into an existing or new Cursor CLI or Codex chat after the
+  interactive session is closed. Use when the user wants a reminder, cron,
+  one-shot, new chat in a folder, or recurring agent run; when they mention
+  schedule-agent, --new, --resume, at/cron, or systemd timers for agents.
 ---
 
 # schedule-agent
 
 Use the `schedule-agent` CLI. Do not write per-job files under `~/.config/systemd/user/`. Do not use a `sleep` loop in an IDE terminal (it dies when the chat closes).
 
-Supported backends: **Cursor CLI** (`agent`, default) and **Codex** (`codex exec resume`).
+Supported backends: **Cursor CLI** (`agent`, default) and **Codex** (`codex exec`). Resume an existing chat with `--chat-id`, or start one with `--new --workspace <dir>`.
 
 ## Workflow
 
