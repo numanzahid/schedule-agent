@@ -1,0 +1,19 @@
+#!/usr/bin/env python3
+import sys
+from pathlib import Path
+
+REPO = Path(__file__).resolve().parent.parent
+INSTALLED = Path.home() / ".local/lib/schedule-agent"
+
+if (REPO / "schedule_agent" / "__init__.py").exists():
+    sys.path.insert(0, str(REPO))
+elif (INSTALLED / "schedule_agent" / "__init__.py").exists():
+    sys.path.insert(0, str(INSTALLED))
+else:
+    sys.stderr.write("schedule-agent: library not found. Run scripts/install.sh\n")
+    sys.exit(2)
+
+from schedule_agent.cli import main
+
+if __name__ == "__main__":
+    sys.exit(main())
