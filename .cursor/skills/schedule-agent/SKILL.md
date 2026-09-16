@@ -91,7 +91,7 @@ Keep `approvalMode` in `~/.cursor/cli-config.json` if needed.
 
 ## Codex notes
 
-Unattended Codex uses `codex exec resume` with `--dangerously-bypass-approvals-and-sandbox`. Confirm `codex login status` first. Do not use interactive `codex resume` for schedules.
+Unattended Codex uses `codex exec` (resume or spawn) with `--dangerously-bypass-approvals-and-sandbox`. Confirm `codex login status` first. Do not use interactive `codex resume` for schedules.
 
 ## Do not
 
