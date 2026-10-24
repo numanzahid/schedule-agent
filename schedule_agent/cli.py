@@ -5,12 +5,19 @@ import json
 import shlex
 import shutil
 import sys
-from datetime import datetime
+from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
 
 from schedule_agent import __version__
-from schedule_agent.agent_run import SKIP_EXIT, log_path, run_job, shlex_join, build_agent_cmd
+from schedule_agent.agent_run import (
+    build_agent_cmd,
+    job_lock,
+    log_path,
+    run_job,
+    shlex_join,
+)
 from schedule_agent.backends import (
     BackendError,
     bin_exists,
@@ -19,7 +26,7 @@ from schedule_agent.backends import (
     normalize_backend,
 )
 from schedule_agent.chats import ChatError, chats_for_cwd, resolve_workspace
-from schedule_agent.config import jobs_path
+from schedule_agent.config import jobs_path, state_dir
 from schedule_agent.cron import parse_cron
 from schedule_agent.jobs import (
     JobError,
@@ -28,8 +35,9 @@ from schedule_agent.jobs import (
     load_registry,
     new_job_id,
     now_iso,
+    registry_lock,
+    save_registry,
     set_enabled,
-    update_job,
     upsert_job,
     validate_job_id,
 )
@@ -52,6 +60,13 @@ def main(argv: list[str] | None = None) -> int:
     except (JobError, ChatError, TimeError, SetupError, BackendError) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1
+
+
+def positive_int(value: str) -> int:
+    number = int(value)
+    if number < 1:
+        raise argparse.ArgumentTypeError("must be at least 1")
+    return number
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -132,6 +147,10 @@ def build_parser() -> argparse.ArgumentParser:
 
     tick = sub.add_parser("tick", help="run jobs that are due (used by systemd)")
     tick.add_argument("--dry-run", action="store_true")
+    tick.add_argument(
+        "--workers", type=positive_int, default=8,
+        help="maximum concurrent jobs (default: 8)",
+    )
     tick.set_defaults(func=cmd_tick)
 
     validate = sub.add_parser("validate", help="check agent, timer, and optional chat id")
@@ -326,26 +345,81 @@ def cmd_run(args: argparse.Namespace) -> int:
     job = _require_job(args.name)
     if args.dry_run:
         return run_job(job, dry_run=True)[0]
-    exit_code, spawned = run_job(job, dry_run=False)
-    if exit_code == SKIP_EXIT:
-        return 0
-    _record_run(job, exit_code, spawned)
-    return 0 if exit_code == 0 else 3
+    return _run_stored_job(job["id"], scheduled=False)
+
+
+def _run_stored_job(job_id: str, *, scheduled: bool) -> int:
+    # Keep the lock through the state update and re-read after acquiring it. A second
+    # dispatcher must not execute a stale snapshot after the first one completes.
+    with job_lock(job_id) as acquired:
+        if not acquired:
+            print(f"SKIP: {job_id} already running", flush=True)
+            return 0
+        job = load_registry()["jobs"].get(job_id)
+        if job is None:
+            return 0
+        started = datetime.now().astimezone()
+        if scheduled and not job_is_due(job, started):
+            return 0
+        error = None
+        try:
+            exit_code, spawned = run_job(job, lock_held=True)
+        except Exception as exc:
+            exit_code, spawned = 2, None
+            error = f"{type(exc).__name__}: {exc}"
+            try:
+                with log_path(job_id).open("a", encoding="utf-8") as log:
+                    log.write(f"{now_iso()} ERROR: {error}\n")
+            except OSError:
+                pass
+        # Code 4 from a backend is a failure too: lock skips happen above.
+        _record_run(job, exit_code, spawned, complete_one_shot=True, started=started, error=error)
+        return 0 if exit_code == 0 else 3
 
 
 def cmd_tick(args: argparse.Namespace) -> int:
-    now = datetime.now().astimezone()
-    due = [job for job in list_jobs() if job_is_due(job, now)]
-    if args.dry_run:
-        for job in due:
-            print(job["id"])
-        return 0
-    for job in due:
-        exit_code, spawned = run_job(job, dry_run=False)
-        if exit_code == SKIP_EXIT:
-            continue
-        _record_run(job, exit_code, spawned, complete_one_shot=True)
-    return 0
+    failed = False
+    active = {}
+    last_scan = None
+    with ThreadPoolExecutor(max_workers=args.workers) as executor:
+        while True:
+            now = datetime.now().astimezone()
+            minute = now.replace(second=0, microsecond=0)
+            if minute != last_scan:
+                last_scan = minute
+                # Scan again every minute while work remains: systemd cannot start
+                # the same oneshot service twice, so this tick handles later jobs.
+                for job in list_jobs():
+                    job_id = job.get("id", "<unknown>")
+                    if job_id in active:
+                        continue
+                    try:
+                        due = job_is_due(job, now)
+                    except Exception as exc:
+                        print(f"FAILED: {job_id}: {exc}", file=sys.stderr, flush=True)
+                        failed = True
+                        continue
+                    if due:
+                        if args.dry_run:
+                            print(job_id)
+                        else:
+                            active[job_id] = executor.submit(_run_stored_job, job_id, scheduled=True)
+            if not active:
+                break
+            seconds_to_scan = max(
+                0, (last_scan + timedelta(minutes=1) - datetime.now().astimezone()).total_seconds()
+            )
+            done, _ = wait(active.values(), timeout=seconds_to_scan, return_when=FIRST_COMPLETED)
+            for job_id, future in list(active.items()):
+                if future not in done:
+                    continue
+                try:
+                    failed = bool(future.result()) or failed
+                except Exception as exc:
+                    print(f"FAILED: {job_id}: {exc}", file=sys.stderr, flush=True)
+                    failed = True
+                del active[job_id]
+    return 3 if failed else 0
 
 
 def _record_run(
@@ -353,23 +427,57 @@ def _record_run(
     exit_code: int,
     spawned: str | None,
     complete_one_shot: bool = False,
+    *,
+    started: datetime | None = None,
+    error: str | None = None,
 ) -> None:
+    finished = datetime.now().astimezone()
     status = "ok" if exit_code == 0 else "failed"
     fields: dict[str, Any] = {
-        "lastRun": now_iso(),
+        "lastRun": now_iso(started or finished),
+        "lastFinishedAt": now_iso(finished),
         "lastStatus": status,
         "lastExit": exit_code,
+        "lastError": error,
+        "failureCount": 0 if exit_code == 0 else int(job.get("failureCount") or 0) + 1,
+        "nextRetryAt": None,
     }
     if spawned:
         fields["lastChatId"] = spawned
         if job.get("spawn") != "each":
             fields["chatId"] = spawned
-    if complete_one_shot:
-        if job.get("schedule", {}).get("type") == "at":
+    if complete_one_shot and job.get("schedule", {}).get("type") == "at":
+        if status == "ok":
             fields["enabled"] = False
-            if status == "ok":
-                fields["completedAt"] = fields["lastRun"]
-    update_job(job["id"], **fields)
+            fields["completedAt"] = fields["lastFinishedAt"]
+        else:
+            # Retry indefinitely, from one minute up to a one-hour backoff.
+            delay = min(3600, 60 * 2 ** min(fields["failureCount"] - 1, 6))
+            fields["nextRetryAt"] = now_iso(finished + timedelta(seconds=delay))
+    if exit_code:
+        detail = error or f"exit {exit_code}"
+        retry = f"; retry after {fields['nextRetryAt']}" if fields["nextRetryAt"] else ""
+        print(f"FAILED: {job['id']}: {detail}{retry}; log: {log_path(job['id'])}", file=sys.stderr, flush=True)
+    with registry_lock():
+        data = load_registry()
+        current = data["jobs"].get(job["id"])
+        # Do not resurrect a removed job or overwrite a replacement made during a run.
+        definition = (
+            "createdAt", "backend", "workspace", "prompt", "schedule", "timeout",
+            "model", "extraArgs", "spawn", "chatId",
+        )
+        if current is None or any(current.get(key) != job.get(key) for key in definition):
+            return
+        current.update(fields)
+        save_registry(data)
+        if exit_code:
+            # Machine-readable local failure feed; stderr also reaches the journal.
+            event = {"job": job["id"], **fields, "log": str(log_path(job["id"]))}
+            try:
+                with (state_dir() / "failures.jsonl").open("a", encoding="utf-8") as handle:
+                    handle.write(json.dumps(event) + "\n")
+            except OSError as exc:
+                print(f"error: could not append failure event: {exc}", file=sys.stderr, flush=True)
 
 
 def cmd_validate(args: argparse.Namespace) -> int:

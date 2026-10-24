@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import fcntl
 import os
+import signal
 import subprocess
 import time
 from contextlib import contextmanager
@@ -51,12 +52,15 @@ def build_agent_cmd(job: dict, extra_env: dict[str, str] | None = None) -> list[
         raise RunError(str(exc), exit_code=2) from exc
 
 
-def run_job(job: dict, dry_run: bool = False) -> tuple[int, str | None]:
+def run_job(job: dict, dry_run: bool = False, *, lock_held: bool = False) -> tuple[int, str | None]:
     job_id = job["id"]
     cmd = build_agent_cmd(job)
     if dry_run:
         print(shlex_join(cmd))
         return 0, None
+
+    if lock_held:
+        return _exec(job, cmd)
 
     with job_lock(job_id) as acquired:
         if not acquired:
@@ -88,37 +92,52 @@ def _exec(job: dict, cmd: list[str]) -> tuple[int, str | None]:
     env["PATH"] = default_path()
     env["HOME"] = str(Path.home())
     env["LANG"] = env.get("LANG") or "C.UTF-8"
-    output = ""
-    with path.open("a", encoding="utf-8") as log:
+    # The child writes directly to the log: no pipe buffering or lost timeout output.
+    with path.open("a+", encoding="utf-8", errors="replace") as log:
         log.write(header)
         log.flush()
+        output_start = log.tell()
         try:
-            proc = subprocess.run(
+            with subprocess.Popen(
                 cmd,
                 cwd=job["workspace"],
                 env=env,
                 stdin=subprocess.DEVNULL,
-                stdout=subprocess.PIPE,
+                stdout=log,
                 stderr=subprocess.STDOUT,
-                timeout=timeout_s,
-                check=False,
-                text=True,
-            )
-            exit_code = proc.returncode
-            output = proc.stdout or ""
-            log.write(output)
-            if output and not output.endswith("\n"):
-                log.write("\n")
-        except subprocess.TimeoutExpired as exc:
-            exit_code = 124
-            output = (exc.stdout or "") if isinstance(exc.stdout, str) else ""
-            if output:
-                log.write(output)
-            log.write(f"ERROR: timed out after {timeout_s}s\n")
-        except FileNotFoundError as exc:
+                start_new_session=True,
+            ) as proc:
+                try:
+                    exit_code = proc.wait(timeout=timeout_s)
+                except subprocess.TimeoutExpired:
+                    # Agents can launch child processes; stop the whole job on timeout.
+                    try:
+                        os.killpg(proc.pid, signal.SIGKILL)
+                    except ProcessLookupError:
+                        pass
+                    proc.wait()
+                    exit_code = 124
+        except OSError as exc:
             exit_code = 2
             log.write(f"ERROR: {exc}\n")
-        spawned = parse_spawned_id(output) if should_spawn(job) else None
+            log.flush()
+        output_end = log.seek(0, os.SEEK_END)
+        log.seek(output_start)
+        spawned = None
+        last_char = ""
+        # Scan incrementally to avoid holding a potentially large agent log in memory.
+        while log.tell() < output_end:
+            line = log.readline()
+            if not line:
+                break
+            if should_spawn(job) and spawned is None:
+                spawned = parse_spawned_id(line)
+            last_char = line[-1:]
+        log.seek(0, os.SEEK_END)
+        if last_char and last_char != "\n":
+            log.write("\n")
+        if exit_code == 124:
+            log.write(f"ERROR: timed out after {timeout_s}s\n")
         if spawned:
             log.write(f"spawned_chat_id={spawned}\n")
         duration = int(time.time() - started)

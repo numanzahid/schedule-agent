@@ -1,9 +1,9 @@
 from __future__ import annotations
 
 import unittest
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 
-from schedule_agent.cron import cron_matches, parse_cron
+from schedule_agent.cron import cron_matches, cron_occurs_between, parse_cron
 
 
 class CronTests(unittest.TestCase):
@@ -47,6 +47,16 @@ class CronTests(unittest.TestCase):
         self.assertTrue(cron_matches(expr, monday))
         self.assertTrue(cron_matches(expr, first))
         self.assertFalse(cron_matches(expr, other))
+
+    def test_interval_search_agrees_with_minute_matching(self) -> None:
+        start = datetime(2026, 9, 13, 23, 53, tzinfo=timezone.utc)
+        expressions = ["*/15 * * * *", "0 9 * * mon", "0 0 14 * 1", "0 0 31 2 *", "7 0 * sep sun", "5,17 0-2 * * *"]
+        for expr in expressions:
+            for offset in (0, 5, 10, 30, 60, 180, 600):
+                end = start + timedelta(minutes=offset)
+                expected = any(cron_matches(expr, start + timedelta(minutes=i)) for i in range(offset + 1))
+                with self.subTest(expr=expr, offset=offset):
+                    self.assertEqual(cron_occurs_between(expr, start, end), expected)
 
     def test_rejects_bad_expr(self) -> None:
         with self.assertRaises(ValueError):

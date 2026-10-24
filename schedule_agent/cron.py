@@ -128,3 +128,30 @@ def minutes_between(start: datetime, end: datetime, limit_hours: int = 24) -> It
     while current <= end:
         yield current
         current += timedelta(minutes=1)
+
+
+def cron_occurs_between(expr: str, start: datetime, end: datetime) -> bool:
+    """Return whether an occurrence exists in an inclusive interval, without a cutoff."""
+    minute_f, hour_f, dom_f, month_f, dow_f = parse_cron(expr)
+    minutes = sorted(expand_field(minute_f, 0, 59))
+    hours = sorted(expand_field(hour_f, 0, 23))
+    doms = expand_field(dom_f, 1, 31)
+    months = expand_field(month_f, 1, 12, MONTH_NAMES)
+    dows = expand_field(dow_f, 0, 7, DOW_NAMES)
+    start = start.astimezone(end.tzinfo) if start.tzinfo else start
+    day = start.replace(hour=0, minute=0, second=0, microsecond=0)
+    while day.date() <= end.date():
+        dom_match = dom_f == "*" or day.day in doms
+        dow_match = dow_f == "*" or cron_dow(day) in dows
+        if dom_f != "*" and dow_f != "*":
+            matches = dom_match or dow_match
+        else:
+            matches = dom_match and dow_match
+        if day.month in months and matches:
+            for hour in hours:
+                for minute in minutes:
+                    candidate = day.replace(hour=hour, minute=minute)
+                    if start <= candidate <= end:
+                        return True
+        day += timedelta(days=1)
+    return False

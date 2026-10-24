@@ -109,7 +109,7 @@ schedule-agent remove nightly
 | `list` / `show` / `remove` | Inspect and delete |
 | `enable` / `disable` | Toggle without deleting |
 | `run <name>` | Run now (ignore the clock) |
-| `tick` | Run due jobs (systemd calls this) |
+| `tick [--workers N]` | Run due jobs concurrently (systemd calls this; default: 8 workers) |
 | `chats` | List local chats (`--backend cursor\|codex\|all`) |
 | `validate` | Check CLIs + timer |
 | `log <name>` | Print the job log |
@@ -156,14 +156,20 @@ Each due job:
 
 1. Takes a per-job flock (the same job overlapping prints `SKIP` and does not mark success; other jobs still run)
 2. Runs Cursor CLI or Codex with stdin closed
-3. Appends `~/.local/state/schedule-agent/logs/<name>.log` with start time, chat id, command, output, end time, exit code
-4. Stores `lastRun` / `lastStatus` / `lastExit`
+3. Streams output directly to `~/.local/state/schedule-agent/logs/<name>.log`, with start time, chat id, command, end time, and exit code; partial output survives timeouts
+4. Stores `lastRun` (attempt start) / `lastFinishedAt` / `lastStatus` / `lastExit`, consecutive `failureCount`, and `nextRetryAt` for failed one-shots
 5. If the job was `--new`, captures the created Cursor `session_id` or Codex `thread_id` and writes `chatId` so the next tick resumes (unless `--new-each-run`)
-6. One-shot `--at` jobs disable after the first attempt
+6. Successful one-shot `--at` jobs disable; failures stay enabled and retry with exponential backoff (1, 2, 4, 8, 16, 32, then 60 minutes, capped at 60 minutes)
 
-The turn is finished when the CLI process exits. That is also how the scheduler knows it is safe to treat the run as closed. Exit `0` is success. Exit `124` means `--timeout` killed it (a hang and a job that needed more time look the same unless you raise `--timeout`). Exit `4` is `SKIP` (already running).
+The turn is finished when the CLI process exits. That is also how the scheduler knows it is safe to treat the run as closed. Exit `0` is success. Exit `124` means `--timeout` killed it (a hang and a job that needed more time look the same unless you raise `--timeout`). A held job lock prints `SKIP` without changing run state. Any nonzero backend exit code, including `4`, is a failure. Timeouts kill the job process group, including subprocesses it started.
 
-Cron jobs that were missed after a previous run can catch up within 24 hours. A brand-new cron job waits for the next matching minute.
+Cron jobs recover missed occurrences since the previous attempt started, or since `createdAt` for a job that has never run. There is no 24-hour cutoff. Multiple missed occurrences coalesce into one catch-up run. Legacy jobs without either timestamp match only the current minute. Failed cron attempts wait for the next cron occurrence.
+
+`tick` runs up to eight jobs concurrently; use `tick --workers N` to change the limit. While jobs remain active or queued, the dispatcher checks for newly due jobs every minute. It rechecks each job under its lock before execution and holds the lock until its result is saved. Queued jobs use the latest registry values; jobs removed or replaced during execution are not overwritten by old results. A slow job occupies one worker slot.
+
+A failed job does not stop the batch. `tick` returns `3` if any job failed, after active and queued work drains, so systemd records a failed service invocation. Each failure immediately prints a summary to stderr (the systemd journal) and appends a JSON event to `~/.local/state/schedule-agent/failures.jsonl`, including the job, exit code, log path, and retry time. This local feed can be monitored for alerts; email and desktop notifications are not sent automatically. `run <name>` bypasses the schedule and retry delay; a successful manual one-shot run also disables the job.
+
+Retries continue until success or until the job is disabled or removed. A failed agent may already have made partial changes, so prompts that may be retried should tolerate repeated execution. This update does not re-enable one-shots disabled by older versions; inspect them and use `enable <name>` to retry them.
 
 Optional binary overrides: `SCHEDULE_AGENT_BIN` (Cursor `agent`) and `SCHEDULE_CODEX_BIN`.
 
