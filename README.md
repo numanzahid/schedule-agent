@@ -1,6 +1,6 @@
 # schedule-agent
 
-Schedule a Cursor CLI or Codex prompt to run later. The job still runs after you close the IDE chat.
+Schedule a Cursor CLI, Codex, or Claude Code prompt to run later. The job still runs after you close the IDE chat.
 
 It can:
 
@@ -14,7 +14,7 @@ A `sleep` loop in an IDE terminal dies when that session ends. `crontab` and per
 ```text
 systemd user timer  (2 files, forever)
   -> schedule-agent tick
-  -> Cursor CLI (`agent`) or Codex (`codex exec`)
+  -> Cursor CLI (`agent`), Codex (`codex exec`), or Claude (`claude --print`)
        resume --chat-id  OR  spawn --new in --workspace
   -> process exits when the turn is done
   -> log + lastStatus  (and store a new chatId after --new)
@@ -26,14 +26,15 @@ systemd user timer  (2 files, forever)
 |-------|--------|--------|-------|
 | Cursor CLI | `agent` | `--resume=<id>` | `--workspace=<dir>` without `--resume` |
 | Codex | `codex` | `codex exec resume <id>` | `codex exec -C <dir>` without `resume` |
+| Claude Code | `claude` | `claude --print --resume <id>` | `claude --print` in the workspace |
 
-Pick the backend per job: `--backend cursor` (default) or `--backend codex`. Do not mix a Cursor thread id with `--backend codex`, or the reverse.
+Pick the backend per job: `--backend cursor` (default), `--backend codex`, or `--backend claude`. Session IDs belong to their backend; use the matching backend when resuming.
 
 ## Requirements
 
 - Linux with systemd user sessions
 - Python 3.9+ (stdlib only)
-- Cursor CLI and/or Codex, logged in for non-interactive use
+- Cursor CLI, Codex, and/or Claude Code, logged in for non-interactive use
 - Optional, once: `sudo loginctl enable-linger $USER` so jobs run while logged out
 
 ## Install
@@ -50,7 +51,7 @@ Install copies:
 
 - CLI to `~/.local/bin/schedule-agent`
 - Python package to `~/.local/lib/schedule-agent/`
-- skill to `~/.cursor/skills/schedule-agent/` and `~/.codex/skills/schedule-agent/`
+- skill to `~/.cursor/skills/schedule-agent/`, `~/.codex/skills/schedule-agent/`, and `~/.claude/skills/schedule-agent/` (or `$CLAUDE_CONFIG_DIR/skills/schedule-agent/`)
 - two systemd user units, then enables the timer
 
 `~/.local/bin` must be on `PATH`. Open a new agent turn after install so the skill is loaded.
@@ -110,7 +111,7 @@ schedule-agent remove nightly
 | `enable` / `disable` | Toggle without deleting |
 | `run <name>` | Run now (ignore the clock) |
 | `tick [--workers N]` | Run due jobs concurrently (systemd calls this; default: 8 workers) |
-| `chats` | List local chats (`--backend cursor\|codex\|all`) |
+| `chats` | List local chats (`--backend cursor\|codex\|claude\|all`) |
 | `validate` | Check CLIs + timer |
 | `log <name>` | Print the job log |
 | `setup` | Write/enable the two user units |
@@ -123,7 +124,7 @@ Exactly one of `--chat-id` or `--new`. Exactly one of `--cron` or `--at`. Exactl
 
 | Flag | Meaning |
 |------|---------|
-| `--backend` | `cursor` (default) or `codex` |
+| `--backend` | `cursor` (default), `codex`, or `claude` |
 | `--chat-id` | Resume this thread |
 | `--new` | Create a chat in `--workspace` on first run, then resume it |
 | `--new-each-run` | Create a fresh chat every run (implies `--new`) |
@@ -155,10 +156,10 @@ Timer (only these two files):
 Each due job:
 
 1. Takes a per-job flock (the same job overlapping prints `SKIP` and does not mark success; other jobs still run)
-2. Runs Cursor CLI or Codex with stdin closed
+2. Runs Cursor CLI, Codex, or Claude Code with stdin closed
 3. Streams output directly to `~/.local/state/schedule-agent/logs/<name>.log`, with start time, chat id, command, end time, and exit code; partial output survives timeouts
 4. Stores `lastRun` (attempt start) / `lastFinishedAt` / `lastStatus` / `lastExit`, consecutive `failureCount`, and `nextRetryAt` for failed one-shots
-5. If the job was `--new`, captures the created Cursor `session_id` or Codex `thread_id` and writes `chatId` so the next tick resumes (unless `--new-each-run`)
+5. If the job was `--new`, captures the created Cursor/Claude `session_id` or Codex `thread_id` and writes `chatId` so the next tick resumes (unless `--new-each-run`)
 6. Successful one-shot `--at` jobs disable; failures stay enabled and retry with exponential backoff (1, 2, 4, 8, 16, 32, then 60 minutes, capped at 60 minutes)
 
 The turn is finished when the CLI process exits. That is also how the scheduler knows it is safe to treat the run as closed. Exit `0` is success. Exit `124` means `--timeout` killed it (a hang and a job that needed more time look the same unless you raise `--timeout`). A held job lock prints `SKIP` without changing run state. Any nonzero backend exit code, including `4`, is a failure. Timeouts kill the job process group, including subprocesses it started.
@@ -171,7 +172,7 @@ A failed job does not stop the batch. `tick` returns `3` if any job failed, afte
 
 Retries continue until success or until the job is disabled or removed. A failed agent may already have made partial changes, so prompts that may be retried should tolerate repeated execution. This update does not re-enable one-shots disabled by older versions; inspect them and use `enable <name>` to retry them.
 
-Optional binary overrides: `SCHEDULE_AGENT_BIN` (Cursor `agent`) and `SCHEDULE_CODEX_BIN`.
+Optional binary overrides: `SCHEDULE_AGENT_BIN` (Cursor `agent`), `SCHEDULE_CODEX_BIN`, and `SCHEDULE_CLAUDE_BIN`. `CLAUDE_CONFIG_DIR` changes where Claude credentials, sessions, and skills are stored.
 
 ## Skills (how agents use this themselves)
 
@@ -181,6 +182,7 @@ Agents do not learn the flags from training data. Install copies `skill/SKILL.md
 |---------|------|
 | Cursor | `~/.cursor/skills/schedule-agent/SKILL.md` |
 | Codex | `~/.codex/skills/schedule-agent/SKILL.md` |
+| Claude Code | `${CLAUDE_CONFIG_DIR:-~/.claude}/skills/schedule-agent/SKILL.md` |
 
 The skill `description` is what gets it selected when someone asks to schedule, remind, cron, or spawn a later agent run. The body tells the agent to call `schedule-agent`, pick `--backend`, resolve `--chat-id` or use `--new --workspace`, and confirm with `show` / `remove`.
 
@@ -244,6 +246,32 @@ Spawn adds `--json` so the new `thread_id` can be stored. Confirm `codex login s
 
 `schedule-agent chats --backend codex` reads `~/.codex/sessions`. Pass `--workspace` if a session has no recorded cwd.
 
+## Claude Code
+
+Claude runs non-interactively in the job workspace with streaming output. New sessions omit `--resume`; existing sessions use their exact session ID:
+
+```bash
+schedule-agent validate --backend claude
+schedule-agent chats --backend claude --cwd "$PWD" --json
+schedule-agent add --backend claude --new --workspace "$PWD" \
+  --name claude-daily --cron "0 6 * * *" \
+  --prompt "Run the report. Do not ask questions; complete autonomously."
+schedule-agent add --backend claude --chat-id <session-id> \
+  --name claude-followup --at "now + 1 hour" \
+  --prompt "Continue the report. Do not ask questions; complete autonomously."
+```
+
+`--new` creates a session once, then resumes it. `--new-each-run` creates a separate session every time. Models and extra Claude flags use `--model`, `--arg`, or `--args` (for example `--args '--max-turns 5'`). Claude starts in the workspace using:
+
+```bash
+claude --print --output-format stream-json --verbose \
+  --dangerously-skip-permissions [--resume <session-id>] [--model <model>] -- "<prompt>"
+```
+
+As with the other unattended backends, the scheduler bypasses interactive permission approvals; schedule work only in trusted workspaces. The `system` initialization event contains `session_id`, which the scheduler captures even after a failed or timed-out first turn. Keep session persistence and the streaming output format enabled so future runs can resume it.
+
+`validate --backend claude` also checks `claude auth status --json`; use `claude auth login` interactively if needed. Session discovery reads top-level project transcripts under `${CLAUDE_CONFIG_DIR:-~/.claude}/projects`, excludes subagents, and uses the transcript workspace when `--workspace` is omitted. It honors session index metadata when available. The backend supports local Claude Code CLI sessions; cloud and desktop session lists are separate. See the [official Claude CLI reference](https://code.claude.com/docs/en/cli-reference) and [session documentation](https://code.claude.com/docs/en/sessions).
+
 ## Uninstall
 
 ```bash
@@ -262,8 +290,9 @@ Spawn adds `--json` so the new `thread_id` can be stored. Confirm `codex login s
 | Permission prompts (Cursor) | Expand `.cursor/cli.json` allow rules |
 | Invalid project config (Cursor) | `.cursor/cli.json` must be permissions-only JSON |
 | Codex auth errors | `codex login status` then `codex login` |
+| Claude auth errors | `schedule-agent validate --backend claude`; `claude auth login` |
 | Logged-out jobs missing | `loginctl show-user $USER -p Linger` |
-| Chat id unknown | `schedule-agent chats --backend cursor\|codex --cwd "$PWD"` |
+| Chat id unknown | `schedule-agent chats --backend cursor\|codex\|claude --cwd "$PWD"` |
 | Skill not used | New agent turn after install; check the skill paths above |
 
 ## Layout
@@ -271,9 +300,9 @@ Spawn adds `--json` so the new `thread_id` can be stored. Confirm `codex login s
 | Path | Role |
 |------|------|
 | `bin/schedule-agent` | Launcher on `PATH` |
-| `schedule_agent/` | CLI, Cursor/Codex backends, jobs, tick |
-| `skill/SKILL.md` | Source skill copied to Cursor and Codex |
-| `scripts/install.sh` | Install CLI, both skills, enable the timer |
+| `schedule_agent/` | CLI, Cursor/Codex/Claude backends, jobs, tick |
+| `skill/SKILL.md` | Source skill copied to Cursor, Codex, and Claude Code |
+| `scripts/install.sh` | Install CLI, all three skills, enable the timer |
 | `scripts/uninstall.sh` | Remove CLI, skills, units (`--purge` also drops jobs/logs) |
 | `tests/` | Unit tests |
 | `examples/cli.json` | Sample Cursor permissions-only config |

@@ -37,4 +37,8 @@ if ! command -v codex >/dev/null 2>&1 && [[ ! -x "${HOME}/.local/bin/codex" ]]; 
   echo "WARN: Codex CLI not found"
 fi
 
+if ! command -v claude >/dev/null 2>&1 && [[ ! -x "${HOME}/.local/bin/claude" ]]; then
+  echo "WARN: Claude Code CLI (claude) not found"
+fi
+
 echo "verify finished"

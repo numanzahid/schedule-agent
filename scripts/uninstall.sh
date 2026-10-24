@@ -5,6 +5,7 @@ BIN="${HOME}/.local/bin/schedule-agent"
 LIB="${HOME}/.local/lib/schedule-agent"
 CURSOR_SKILL="${HOME}/.cursor/skills/schedule-agent"
 CODEX_SKILL="${HOME}/.codex/skills/schedule-agent"
+CLAUDE_SKILL="${CLAUDE_CONFIG_DIR:-${HOME}/.claude}/skills/schedule-agent"
 UNIT_DIR="${HOME}/.config/systemd/user"
 PURGE=0
 
@@ -18,7 +19,7 @@ fi
 
 rm -f "${UNIT_DIR}/cursor-schedule.service" "${UNIT_DIR}/cursor-schedule.timer"
 rm -f "${BIN}"
-rm -rf "${LIB}" "${CURSOR_SKILL}" "${CODEX_SKILL}"
+rm -rf "${LIB}" "${CURSOR_SKILL}" "${CODEX_SKILL}" "${CLAUDE_SKILL}"
 
 if [[ "${PURGE}" -eq 1 ]]; then
   rm -rf "${HOME}/.config/schedule-agent" "${HOME}/.local/state/schedule-agent"

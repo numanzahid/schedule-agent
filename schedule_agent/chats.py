@@ -4,8 +4,10 @@ import json
 from datetime import datetime
 from pathlib import Path
 from typing import Any
+from uuid import UUID
 
 from schedule_agent.backends import normalize_backend
+from schedule_agent.config import claude_config_dir
 
 CHATS_ROOT = Path.home() / ".cursor" / "chats"
 CODEX_SESSIONS = Path.home() / ".codex" / "sessions"
@@ -29,6 +31,8 @@ def iter_chats(backend: str | None = None) -> list[dict[str, Any]]:
     kind = normalize_backend(backend)
     if kind == "codex":
         return iter_codex_chats()
+    if kind == "claude":
+        return iter_claude_chats()
     return iter_cursor_chats()
 
 
@@ -97,6 +101,75 @@ def _codex_row(path: Path) -> dict[str, Any] | None:
     }
 
 
+def iter_claude_chats() -> list[dict[str, Any]]:
+    # Only top-level project transcripts: nested subagents are not resumable chats.
+    projects = claude_config_dir() / "projects"
+    rows: dict[str, dict[str, Any]] = {}
+    for project in projects.glob("*"):
+        index = _read_json(project / "sessions-index.json") or {}
+        entries = index.get("entries")
+        metadata = {
+            entry["sessionId"]: entry for entry in entries
+            if isinstance(entry, dict) and isinstance(entry.get("sessionId"), str)
+        } if isinstance(entries, list) else {}
+        for path in project.glob("*.jsonl"):
+            row = _claude_row(path, metadata.get(path.stem) or {})
+            if row and (row["id"] not in rows or row["updatedAt"] > rows[row["id"]]["updatedAt"]):
+                rows[row["id"]] = row
+    return sorted(rows.values(), key=lambda row: row["updatedAt"], reverse=True)
+
+
+def _claude_row(path: Path, metadata: dict[str, Any]) -> dict[str, Any] | None:
+    try:
+        UUID(path.stem)
+    except ValueError:
+        return None
+    if metadata.get("isSidechain"):
+        return None
+    cwd = metadata.get("projectPath") or metadata.get("cwd")
+    title = metadata.get("customTitle") or metadata.get("summary") or metadata.get("firstPrompt")
+    found = False
+    try:
+        mtime = datetime.fromtimestamp(path.stat().st_mtime).astimezone()
+        with path.open(encoding="utf-8", errors="replace") as handle:
+            # Session files may be large. Metadata is near the start, after optional
+            # queue/snapshot events; never read the full conversation into memory.
+            for _ in range(256):
+                line = handle.readline(256 * 1024)
+                if not line:
+                    break
+                try:
+                    event = json.loads(line)
+                except ValueError:
+                    continue
+                if not isinstance(event, dict) or event.get("sessionId") != path.stem:
+                    continue
+                if event.get("isSidechain"):
+                    return None
+                found = True
+                cwd = cwd or event.get("cwd")
+                if not title and event.get("type") == "user":
+                    message = event.get("message")
+                    content = message.get("content") if isinstance(message, dict) else None
+                    if isinstance(content, list):
+                        content = " ".join(
+                            item["text"] for item in content
+                            if isinstance(item, dict) and isinstance(item.get("text"), str)
+                        )
+                    if isinstance(content, str) and content.strip():
+                        title = content.strip().splitlines()[0][:120]
+                if cwd and title:
+                    break
+    except OSError:
+        return None
+    if not found:
+        return None
+    return {
+        "id": path.stem, "backend": "claude", "title": str(title or "(untitled)"),
+        "cwd": cwd, "updatedAt": mtime.isoformat(timespec="seconds"), "metaPath": str(path),
+    }
+
+
 def chats_for_cwd(cwd: str | None = None, backend: str | None = None) -> list[dict[str, Any]]:
     target = str(Path(cwd).expanduser().resolve()) if cwd else None
     rows = []
@@ -110,7 +183,7 @@ def chats_for_cwd(cwd: str | None = None, backend: str | None = None) -> list[di
         elif target and not row.get("cwd"):
             continue
         rows.append(row)
-    return rows if target else iter_chats(backend)
+    return rows
 
 
 def resolve_workspace(
@@ -126,7 +199,10 @@ def resolve_workspace(
 
     kind = normalize_backend(backend)
     matches = [row for row in iter_chats(kind) if row["id"] == chat_id]
-    hint = "~/.codex/sessions" if kind == "codex" else "~/.cursor/chats"
+    hint = {
+        "codex": "~/.codex/sessions", "cursor": "~/.cursor/chats",
+        "claude": str(claude_config_dir() / "projects"),
+    }[kind]
     if not matches:
         raise ChatError(
             f"chat id not found under {hint}: {chat_id}. Pass --workspace /abs/path"

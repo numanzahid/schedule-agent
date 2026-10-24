@@ -19,8 +19,11 @@ from schedule_agent.agent_run import (
     shlex_join,
 )
 from schedule_agent.backends import (
+    BACKENDS,
     BackendError,
     bin_exists,
+    claude_auth_status,
+    claude_bin,
     codex_bin,
     cursor_bin,
     normalize_backend,
@@ -72,7 +75,7 @@ def positive_int(value: str) -> int:
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="schedule-agent",
-        description="Schedule prompts into an existing or new agent chat (Cursor CLI and Codex).",
+        description="Schedule prompts into an existing or new agent chat (Cursor CLI, Codex, and Claude Code).",
     )
     parser.add_argument("--version", action="version", version=f"schedule-agent {__version__}")
     sub = parser.add_subparsers(dest="cmd", required=True)
@@ -81,7 +84,7 @@ def build_parser() -> argparse.ArgumentParser:
     add.add_argument(
         "--backend",
         default="cursor",
-        help="agent backend: cursor or codex (default: cursor)",
+        help="agent backend: cursor, codex, or claude (default: cursor)",
     )
     add.add_argument("--chat-id", help="existing chat / thread id to resume")
     add.add_argument(
@@ -159,7 +162,7 @@ def build_parser() -> argparse.ArgumentParser:
     validate.add_argument(
         "--backend",
         default="cursor",
-        help="agent backend to check with --chat-id (default: cursor)",
+        help="backend to validate: cursor, codex, or claude (default: cursor)",
     )
     validate.add_argument("--json", action="store_true")
     validate.set_defaults(func=cmd_validate)
@@ -169,7 +172,7 @@ def build_parser() -> argparse.ArgumentParser:
     chats.add_argument(
         "--backend",
         default="cursor",
-        help="cursor, codex, or all (default: cursor)",
+        help="cursor, codex, claude, or all (default: cursor)",
     )
     chats.add_argument("--json", action="store_true")
     chats.set_defaults(func=cmd_chats)
@@ -494,23 +497,19 @@ def cmd_validate(args: argparse.Namespace) -> int:
             report["ok"] = False
 
     requested = normalize_backend(getattr(args, "backend", "cursor"))
-    cursor = cursor_bin()
-    codex = codex_bin()
-    if bin_exists(cursor):
-        check("cursor", True, str(cursor))
-    elif requested == "cursor":
-        check("cursor", False, "Cursor CLI (agent) not found")
-    else:
-        report.setdefault("warnings", []).append("Cursor CLI not installed")
-        check("cursor", True, "not installed")
-
-    if bin_exists(codex):
-        check("codex", True, str(codex))
-    elif requested == "codex":
-        check("codex", False, "Codex CLI not found")
-    else:
-        report.setdefault("warnings", []).append("Codex CLI not installed")
-        check("codex", True, "not installed")
+    binaries = {"cursor": cursor_bin(), "codex": codex_bin(), "claude": claude_bin()}
+    labels = {"cursor": "Cursor CLI (agent)", "codex": "Codex CLI", "claude": "Claude Code CLI"}
+    for backend, binary in binaries.items():
+        if bin_exists(binary):
+            check(backend, True, str(binary))
+        elif requested == backend:
+            check(backend, False, f"{labels[backend]} not found")
+        else:
+            report.setdefault("warnings", []).append(f"{labels[backend]} not installed")
+            check(backend, True, "not installed")
+    if requested == "claude" and bin_exists(binaries["claude"]):
+        authenticated, detail = claude_auth_status()
+        check("claudeAuth", authenticated, detail)
     systemctl = shutil.which("systemctl")
     if systemctl:
         check("systemctl", True, systemctl)
@@ -559,7 +558,7 @@ TIMER_HINT = "run: schedule-agent setup"
 def cmd_chats(args: argparse.Namespace) -> int:
     kind = (args.backend or "cursor").strip().lower()
     if kind == "all":
-        rows = chats_for_cwd(args.cwd, "cursor") + chats_for_cwd(args.cwd, "codex")
+        rows = [row for backend in BACKENDS for row in chats_for_cwd(args.cwd, backend)]
         rows.sort(key=lambda row: row.get("updatedAt") or "", reverse=True)
     else:
         normalize_backend(kind)

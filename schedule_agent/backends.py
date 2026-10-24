@@ -3,11 +3,12 @@ from __future__ import annotations
 import json
 import os
 import shutil
+import subprocess
 from pathlib import Path
 
 from schedule_agent.config import log_dir
 
-BACKENDS = ("cursor", "codex")
+BACKENDS = ("cursor", "codex", "claude")
 DEFAULT_BACKEND = "cursor"
 
 
@@ -19,9 +20,11 @@ def normalize_backend(value: str | None) -> str:
     raw = (value or DEFAULT_BACKEND).strip().lower()
     if raw in {"cursor", "cursor-cli", "agent"}:
         return "cursor"
-    if raw == "codex":
-        return "codex"
-    raise BackendError(f"unknown backend: {value!r} (supported: cursor, codex)")
+    if raw in {"codex", "claude"}:
+        return raw
+    if raw == "claude-code":
+        return "claude"
+    raise BackendError(f"unknown backend: {value!r} (supported: {', '.join(BACKENDS)})")
 
 
 def _resolve_bin(env_name: str, name: str) -> Path:
@@ -45,10 +48,29 @@ def codex_bin() -> Path:
     return _resolve_bin("SCHEDULE_CODEX_BIN", "codex")
 
 
+def claude_bin() -> Path:
+    return _resolve_bin("SCHEDULE_CLAUDE_BIN", "claude")
+
+
 def bin_exists(path: Path) -> bool:
-    if path.exists():
-        return True
-    return shutil.which(str(path)) is not None or shutil.which(path.name) is not None
+    return shutil.which(str(path)) is not None
+
+
+def claude_auth_status() -> tuple[bool, str]:
+    try:
+        proc = subprocess.run(
+            [str(claude_bin()), "auth", "status", "--json"],
+            stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=10,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        return False, f"could not check Claude authentication: {exc}"
+    try:
+        data = json.loads(proc.stdout)
+    except (ValueError, TypeError):
+        data = None
+    if proc.returncode == 0 and isinstance(data, dict) and data.get("loggedIn") is True:
+        return True, "authenticated; method: " + str(data.get("authMethod") or "configured provider")
+    return False, "Claude is not authenticated or auth status failed; run: claude auth login"
 
 
 def extra_args(job: dict) -> list[str]:
@@ -66,6 +88,8 @@ def build_cmd(job: dict) -> list[str]:
     backend = normalize_backend(job.get("backend"))
     if backend == "codex":
         return _codex_cmd(job)
+    if backend == "claude":
+        return _claude_cmd(job)
     return _cursor_cmd(job)
 
 
@@ -117,6 +141,22 @@ def _codex_cmd(job: dict) -> list[str]:
         cmd.append(job["prompt"])
     else:
         cmd.extend(["resume", job["chatId"], job["prompt"]])
+    return cmd
+
+
+def _claude_cmd(job: dict) -> list[str]:
+    # cwd is supplied by the runner. Stream JSON emits the session ID at startup,
+    # so a failed or timed-out first attempt can still be resumed on retry.
+    cmd = [
+        str(claude_bin()), "--print", "--output-format", "stream-json",
+        "--verbose", "--dangerously-skip-permissions",
+    ]
+    if not should_spawn(job):
+        cmd.extend(["--resume", job["chatId"]])
+    if job.get("model"):
+        cmd.extend(["--model", job["model"]])
+    cmd.extend(extra_args(job))
+    cmd.extend(["--", job["prompt"]])
     return cmd
 
 

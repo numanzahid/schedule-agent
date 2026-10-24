@@ -1,7 +1,7 @@
 ---
 name: schedule-agent
 description: >-
-  Schedules prompts into an existing or new Cursor CLI or Codex chat after the
+  Schedules prompts into an existing or new Cursor CLI, Codex, or Claude Code chat after the
   interactive session is closed. Use when the user wants a reminder, cron,
   one-shot, new chat in a folder, or recurring agent run; when they mention
   schedule-agent, --new, --resume, at/cron, or systemd timers for agents.
@@ -11,14 +11,14 @@ description: >-
 
 Use the `schedule-agent` CLI. Do not write per-job files under `~/.config/systemd/user/`. Do not use a `sleep` loop in an IDE terminal (it dies when the chat closes).
 
-Supported backends: **Cursor CLI** (`agent`, default) and **Codex** (`codex exec`). Resume an existing chat with `--chat-id`, or start one with `--new --workspace <dir>`.
+Supported backends: **Cursor CLI** (`agent`, default), **Codex** (`codex exec`), and **Claude Code** (`claude --print`). Resume an existing chat with `--chat-id`, or start one with `--new --workspace <dir>`.
 
 ## Workflow
 
-1. `schedule-agent validate --backend cursor` or `--backend codex`.
-2. Resolve chat id: user-supplied, or `schedule-agent chats --backend <cursor|codex> --cwd "$PWD" --json`.
+1. `schedule-agent validate --backend cursor`, `--backend codex`, or `--backend claude`.
+2. Resolve chat id: user-supplied, or `schedule-agent chats --backend <cursor|codex|claude> --cwd "$PWD" --json`.
 3. Compose a prompt that names exact steps and ends with: `Do not ask questions; complete autonomously.`
-4. Add the job with `--backend cursor` or `--backend codex` (`--at` or `--cron`, never both).
+4. Add the job with `--backend cursor`, `--backend codex`, or `--backend claude` (`--at` or `--cron`, never both).
 5. Confirm with `schedule-agent show <name>` and tell the user how to cancel: `schedule-agent remove <name>`.
 
 If validate says the timer is off: `schedule-agent setup`.
@@ -31,6 +31,7 @@ Match the agent that should wake up, not necessarily the agent writing the job.
 |------|-------------|-------------|
 | Continue **this** Cursor chat later | `cursor` | `schedule-agent chats --backend cursor --cwd "$PWD" --json` |
 | Continue **this** Codex chat later | `codex` | `schedule-agent chats --backend codex --cwd "$PWD" --json` |
+| Continue **this** Claude Code chat later | `claude` | `schedule-agent chats --backend claude --cwd "$PWD" --json` |
 | Start a **new** chat | matching backend | `--new --workspace /abs/path` (no `--chat-id`) |
 | Wake a **different** existing chat | that chat's backend | that chat's id |
 
@@ -45,6 +46,8 @@ schedule-agent add --backend cursor --new --new-each-run --workspace /path/to/pr
 schedule-agent add --backend cursor --new --workspace "$PWD" --at "now" --prompt "..." --args "--sandbox disabled"
 schedule-agent add --backend codex --chat-id <uuid> --workspace "$PWD" --prompt "..." --cron "0 6 * * *" --name daily
 schedule-agent add --backend codex --new --workspace "$PWD" --prompt "..." --at "now + 1 hour" --arg -s --arg workspace-write
+schedule-agent add --backend claude --new --workspace "$PWD" --at "now + 1 hour" --prompt "Run the report. Do not ask questions; complete autonomously."
+schedule-agent add --backend claude --chat-id <uuid> --cron "0 6 * * *" --prompt "Run the report. Do not ask questions; complete autonomously."
 schedule-agent list --json
 schedule-agent show <name>
 schedule-agent remove <name>
@@ -54,7 +57,7 @@ schedule-agent chats --backend all --cwd "$PWD" --json
 schedule-agent validate --backend codex --chat-id <uuid>
 ```
 
-For Cursor CLI, `--workspace` is optional when `~/.cursor/chats/*/<id>/meta.json` has `cwd`. For Codex, pass `--workspace` if `chats` does not show a cwd.
+For Cursor CLI, `--workspace` is optional when `~/.cursor/chats/*/<id>/meta.json` has `cwd`. For Claude Code, workspace discovery reads `${CLAUDE_CONFIG_DIR:-~/.claude}/projects`. For Codex or Claude Code, pass `--workspace` if `chats` does not show a cwd.
 
 ## Schedule mapping
 
@@ -65,7 +68,7 @@ For Cursor CLI, `--workspace` is optional when `~/.cursor/chats/*/<id>/meta.json
 | every Monday 9am | `--cron "0 9 * * 1"` |
 | every 15 minutes | `--cron "*/15 * * * *"` |
 
-Cron is 5 fields: minute hour dom month dow. One dispatcher timer wakes once a minute; `tick` runs matching jobs.
+Cron is 5 fields: minute hour dom month dow. One dispatcher timer wakes once a minute; `tick` runs due jobs concurrently and catches up missed occurrences. Failed one-shots retry with backoff; use `disable` or `remove` to stop retries.
 
 ## Prompt rules
 
@@ -93,10 +96,16 @@ Keep `approvalMode` in `~/.cursor/cli-config.json` if needed.
 
 Unattended Codex uses `codex exec` (resume or spawn) with `--dangerously-bypass-approvals-and-sandbox`. Confirm `codex login status` first. Do not use interactive `codex resume` for schedules.
 
+## Claude Code notes
+
+Unattended Claude uses `claude --print --output-format stream-json --verbose --dangerously-skip-permissions` in the job workspace. Resume passes `--resume <session-id>`; spawn omits it. The early `session_id` is saved even if the attempt fails or times out, so the next attempt resumes it. `--new-each-run` always starts fresh.
+
+Run `schedule-agent validate --backend claude` to check the executable and authentication (`claude auth status --json`). If needed, run `claude auth login` interactively first. Override the executable with `SCHEDULE_CLAUDE_BIN`; `CLAUDE_CONFIG_DIR` controls credentials, transcripts, and skills. The install script also installs this skill into Claude Code. Extra flags and models use `--arg` / `--args` and `--model`, as with the other backends. Do not disable session persistence or override the streaming output format if the job must capture and resume its new session.
+
 ## Do not
 
 - `crontab -e`, `sudo crontab`, or files in `/etc/cron.d`
 - New systemd units per job
 - Call the agent CLI by hand unless debugging (`schedule-agent run` is the path)
 - Ask the user questions after they asked to schedule; pick `--name` from the task slug
-- Mix Cursor and Codex ids on the same job
+- Mix Cursor, Codex, and Claude session ids on the same job

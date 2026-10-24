@@ -1,3 +1,3 @@
-"""schedule-agent: schedule Cursor CLI or Codex prompts (resume or spawn)."""
+"""schedule-agent: schedule Cursor CLI, Codex, or Claude Code prompts (resume or spawn)."""
 
-__version__ = "0.3.0"
+__version__ = "0.4.0"

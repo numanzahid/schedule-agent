@@ -66,3 +66,7 @@ def default_path() -> str:
     if extra not in current.split(":"):
         return extra + ":" + current
     return current
+
+
+def claude_config_dir() -> Path:
+    return Path(os.environ.get("CLAUDE_CONFIG_DIR") or Path.home() / ".claude").expanduser()
